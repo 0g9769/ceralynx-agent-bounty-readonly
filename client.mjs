@@ -8,6 +8,7 @@ const ALLOWED = new Set(['initialize','tools/list','tools/call']);
 const TOOLS = new Set(['list_bounties','get_new_bounties','get_bounty','get_feed_stats']);
 const BLOCK_REQUIREMENTS = new Set(['kyc','stake','bond','purchase','human_only']);
 const TIMEOUT_MS = 12500;
+const MAX_REPLY_BYTES = 1_500_000;
 
 export function verifyUrl(url) {
   const parsed = new URL(url);
@@ -26,10 +27,30 @@ export function parseSse(raw) {
   throw new Error('MCP response contained no JSON-RPC event');
 }
 export function decodeMcp(contentType,body){
-  if(body.length>1_500_000)throw new Error('Denied: oversized MCP response');
+  if(Buffer.byteLength(body,'utf8')>MAX_REPLY_BYTES)throw new Error('Denied: oversized MCP response');
   if((contentType||'').includes('application/json'))return JSON.parse(body);
   if((contentType||'').includes('text/event-stream'))return parseSse(body);
   throw new Error('Denied: unsupported MCP response type');
+}
+export async function readLimited(response, limit=MAX_REPLY_BYTES){
+  if(!Number.isSafeInteger(limit)||limit<1)throw new Error('Invalid response limit');
+  if(!response.body||!response.body.getReader)throw new Error('MCP response has no stream body');
+  const reader=response.body.getReader();
+  const decoder=new TextDecoder('utf-8',{fatal:true});
+  let received=0,body='';
+  try{
+    for(;;){
+      const {done,value}=await reader.read();
+      if(done)break;
+      received+=value.byteLength;
+      if(received>limit)throw new Error('Denied: streamed MCP response oversized');
+      body+=decoder.decode(value,{stream:true});
+    }
+    return body+decoder.decode();
+  }finally{
+    reader.releaseLock();
+    if(received>limit)await reader.cancel().catch(()=>{});
+  }
 }
 export function validateMethod(method,params) {
   if(!ALLOWED.has(method))throw new Error(`Denied: non-read-only MCP method ${method}`);
@@ -48,8 +69,8 @@ export async function rpc(method,params={},opts={}){
     });
     if(!res.ok)throw new Error(`MCP HTTP ${res.status}`);
     const n=Number(res.headers.get('content-length')??'0');
-    if(n>1_500_000)throw new Error('Denied: oversized response header');
-    const text=await res.text();
+    if(n>MAX_REPLY_BYTES)throw new Error('Denied: oversized response header');
+    const text=await readLimited(res,MAX_REPLY_BYTES);
     const packet=decodeMcp(res.headers.get('content-type'),text);
     if(packet.error)throw new Error(`MCP JSON-RPC error ${packet.error.code}: ${packet.error.message}`);
     if(packet.jsonrpc!=='2.0'||!('result' in packet))throw new Error('Invalid MCP JSON-RPC envelope');

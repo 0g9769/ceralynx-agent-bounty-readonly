@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {verifyUrl,parseSse,decodeMcp,validateMethod,unwrapItems,assess,safeArgs,rpc,main} from './client.mjs';
+import {verifyUrl,parseSse,decodeMcp,validateMethod,unwrapItems,assess,safeArgs,rpc,main,readLimited} from './client.mjs';
 const packet={jsonrpc:'2.0',id:1,result:{tools:[]}};
 const response=(value,contentType='application/json',status=200)=>new Response(typeof value==='string'?value:JSON.stringify(value),{status,headers:{'content-type':contentType}});
 test('allow exact HTTPS endpoint',()=>assert.equal(verifyUrl('https://agent-bounty-feed.dailydollar.workers.dev/mcp'),'https://agent-bounty-feed.dailydollar.workers.dev/mcp'));
@@ -31,3 +31,8 @@ test('rpc surface JSON-RPC failure',async()=>assert.rejects(()=>rpc('tools/list'
 test('rpc reject bad envelope',async()=>assert.rejects(()=>rpc('tools/list',{}, {fetch:async()=>response({ok:true})})));
 test('main list dry run with mock',async()=>{const calls=[];const result=await main(['list'],{silent:true,rpc:async(method,params)=>{calls.push({method,params});return method==='initialize'?{protocolVersion:'2025-06-18'}:{content:[{type:'text',text:JSON.stringify({items:[{id:'x',title:'T',url:'https://x.com',est_usd:2}]})}]};}});assert.equal(result.items.length,1);assert.equal(calls.length,2);assert.equal(calls[1].params.name,'list_bounties');assert.match(calls[1].params.arguments.exclude_requires,/purchase/);});
 test('main fail on incompatible protocol',async()=>assert.rejects(()=>main(['stats'],{silent:true,rpc:async()=>({protocolVersion:'1990-01-01'})})));
+
+test('bounded streaming reader permits exact bound',async()=>assert.equal(await readLimited(response('1234'),4),'1234'));
+test('bounded streaming reader rejects over-limit without trusting Content-Length',async()=>assert.rejects(()=>readLimited(response('12345'),4),/oversized/));
+test('byte boundary is UTF-8 encoded byte count, not characters',async()=>assert.rejects(()=>readLimited(response('€'),2),/oversized/));
+test('reject zero response limit',async()=>assert.rejects(()=>readLimited(response('{}'),0),/Invalid response limit/));
